@@ -105,8 +105,9 @@
                     return cellStateIn[getCellIndex(vec2(x, y))];
                 }
 
-                fn sigmoid(x: f32, k: f32, x0: f32) -> f32 {
-                    return 1.0 / (1.0 + exp(-k * (x - x0)));
+                fn sigmoid(x: f32, alpha: f32, x0: f32) -> f32 {
+                    let k = 1 / alpha;
+                    return 1.0 / (10.0 + exp(-k * (x - x0)));
                 }
 
                 fn sigmoidInterval(x: f32, a: f32, b: f32, alpha: f32) -> f32 {
@@ -170,21 +171,10 @@
                         let cellIndex = getCellIndex(cell.xy);
                         let cellState = getCellState(cell.x, cell.y);
 
-                        // var birthLowerLimit:     f32 = 0.258;
-                        // var birthHigherLimit:    f32 = 0.385;
-                        // var survivalLowerLimit:  f32 = 0.247;
-                        // var survivalHigherLimit: f32 = 0.465;
-                        // var transitionWidthM:    f32 = 0.147;
-                        // var transitionWidthN:    f32 = 0.028;
-                        // var threshold1:          f32 = 0;
-                        // var threshold2:          f32 = 0;
-                        // var aliveness:           f32 = 0;
-                        // var newCellState:        f32 = 0;
-
-                        var birthLowerLimit:     f32 = 0.27;
-                        var birthHigherLimit:    f32 = 0.465;
-                        var survivalLowerLimit:  f32 = 0.227;
-                        var survivalHigherLimit: f32 = 0.445;
+                        var birthLowerLimit:     f32 = 0.258;
+                        var birthHigherLimit:    f32 = 0.385;
+                        var survivalLowerLimit:  f32 = 0.247;
+                        var survivalHigherLimit: f32 = 0.465;
                         var transitionWidthM:    f32 = 0.147;
                         var transitionWidthN:    f32 = 0.028;
                         var threshold1:          f32 = 0;
@@ -197,11 +187,11 @@
                         threshold2 = mix(birthHigherLimit, survivalHigherLimit, aliveness);
                         newCellState = sigmoidInterval(outerKernelStateNormalized, threshold1, threshold2, transitionWidthN);
 
-                        //cellStateOut[cellIndex] = newCellState;
+                        newCellState = clamp(newCellState, 0.0, 1.0);
 
                         // Survival Condition
                         if          ((cellState > 0) && (innerKernelStateNormalized > 0.5) && (survivalLowerLimit < outerKernelStateNormalized && outerKernelStateNormalized < survivalHigherLimit)) {
-                                        cellStateOut[cellIndex] = 1 / newCellState;
+                                        cellStateOut[cellIndex] = 1 - newCellState;
                         // Birth Condition
                         } else if   ((cellState == 0) && (innerKernelStateNormalized < 0.5) && (birthLowerLimit < outerKernelStateNormalized && outerKernelStateNormalized < birthHigherLimit)) {
                                         cellStateOut[cellIndex] = 1;
@@ -288,7 +278,8 @@
         const cellStateArray = new Float32Array(GRID_SIZE * GRID_SIZE);
         
         for (let i = 0; i < cellStateArray.length; ++i) {
-            cellStateArray[i] = Math.random() > 0.6 ? 1 : 0;
+            //cellStateArray[i] = Math.random() > 0.6 ? 1 : 0;
+            cellStateArray[i] = Math.random();
         }
 
         const cellStateInputBuffer = device.createBuffer({
@@ -300,7 +291,8 @@
         device.queue.writeBuffer(cellStateInputBuffer, 0, cellStateArray);
         
         for (let i = 0; i < cellStateArray.length; i++) {
-            cellStateArray[i] = i % 2;
+            //cellStateArray[i] = i % 2;
+            cellStateArray[i] = Math.random();
         }
 
         const cellStateOutputBuffer = device.createBuffer({
