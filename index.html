@@ -10,11 +10,13 @@
     <canvas></canvas>
     <script type="module">
 
-        const GRID_SIZE = window.innerWidth;
+        const GRID_SIZE = 512;
+        //const GRID_SIZE = 128;
         const UPDATE_INTERVAL = 200; // Update every 200ms (5 times/sec)
         const WORKGROUP_SIZE = 8; // 8x8 workgroups
         let step = 0; // Track how many simulation steps have been run
-        const BUFFER_SIZE = 1000;
+        const CELL_INFO_SIZE = 4 * 4; // u32 values each of size 4 bytes
+        const BUFFER_SIZE = GRID_SIZE * GRID_SIZE * CELL_INFO_SIZE;
 
         /*
             Here's the device
@@ -88,12 +90,7 @@
 
                 struct CellInfo {
                     position: vec2u,
-                    innerKernelCellCount: u32,
-                    innerKernelStateSum: f32,
-                    innerKernelStateNormalized: f32,
-                    outerKernelCellCount: u32,
-                    outerKernelStateSum: f32,
-                    outerKernelStateNormalized: f32,
+                    newCellState: f32,
                 }
 
                 fn getCellIndex(cell: vec2u) -> u32 {
@@ -105,13 +102,39 @@
                     return cellStateIn[getCellIndex(vec2(x, y))];
                 }
 
-                fn sigmoid(x: f32, alpha: f32, x0: f32) -> f32 {
-                    let k = 1 / alpha;
-                    return 1.0 / (10.0 + exp(-k * (x - x0)));
+                fn sigmoid_a(x: f32, a: f32, b: f32) -> f32 {
+                    return 1.0 / (1.0 + exp(-(x - a) * 4 / b));
+                }
+
+                fn sigmoid_b(x: f32, b: f32, eb: f32) -> f32 {
+                    return 1.0 - sigmoid_a(x, b, eb);
+                }
+
+                fn sigmoid_ab(x: f32, a: f32, b: f32, ea: f32, eb: f32) -> f32 {
+                     return sigmoid_a(x, a, ea) * sigmoid_b(x, b, eb);
+                }
+
+                fn sigmoid_mix(x: f32, y: f32, m: f32, em: f32) -> f32 {
+                    return x * (1.0 - sigmoid_a(m, 0.5, em)) + y * sigmoid_a(m, 0.5, em);
+                }
+
+                // SmoothLifeL
+                fn transition_function(innerKernelStateSumsNormalized: f32, outerKernelStateSumsNormalized: f32) -> f32 {
+                    var b1: f32 = 0.278;
+                    var b2: f32 = 0.365;
+                    var d1: f32 = 0.267;
+                    var d2: f32 = 0.445;
+                    var alpha_m: f32 = 0.147;
+                    var alpha_n: f32 = 0.028;
+                    return sigmoid_mix(sigmoid_ab(innerKernelStateSumsNormalized, b1, b2, alpha_m, alpha_n),
+                                       sigmoid_ab(innerKernelStateSumsNormalized, d1, d2, alpha_m, alpha_n), 
+                                       outerKernelStateSumsNormalized, 
+                                       alpha_m
+                            );
                 }
 
                 fn sigmoidInterval(x: f32, a: f32, b: f32, alpha: f32) -> f32 {
-                    return sigmoid(x, a, alpha) * (1.0 - sigmoid(x, b, alpha));
+                    return sigmoid_a(x, alpha, b) * (1.0 - sigmoid_a(x, alpha, b));
                 }
 
                 @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
@@ -119,14 +142,11 @@
                         @builtin(global_invocation_id) cell : vec3u,
                         @builtin(local_invocation_id) local_id : vec3<u32>,
                     ) {
-                        // Initialize the cell info.
-                        var cellInfo: CellInfo = CellInfo(cell.xy, 0, 0, 0, 0, 0, 0);
-
                         // Process every cell within range of the current cell.
-                        var innerKernelCellCount: u32 = 0;
+                        var innerKernelCellTotal: u32 = 0;
                         var innerKernelStateSum: f32 = 0;
                         var innerKernelStateNormalized: f32 = 0;
-                        var outerKernelCellCount: u32 = 0;
+                        var outerKernelCellTotal: u32 = 0;
                         var outerKernelStateSum: f32 = 0;
                         var outerKernelStateNormalized: f32 = 0;
                         var r: i32 = 4;
@@ -138,67 +158,67 @@
 
                                 // Check if it's the center cell, if so, update counts and continue to avoid double counting.
                                 if (x == 0 && y == 0) {
-                                    innerKernelCellCount = innerKernelCellCount + 1;
+                                    innerKernelCellTotal = innerKernelCellTotal + 1;
                                     innerKernelStateSum = innerKernelStateSum + isCellActive;
                                     continue;
                                 }
 
                                 // Check for immediate neighbors
                                 if ((x == -1 || x == 1 || x == 0) && (y == -1 || y == 1 || y == 0)) {
-                                    innerKernelCellCount = innerKernelCellCount + 1;
+                                    innerKernelCellTotal = innerKernelCellTotal + 1;
                                     innerKernelStateSum = innerKernelStateSum + isCellActive;
                                 } else {
-                                    outerKernelCellCount = outerKernelCellCount + 1;
+                                    outerKernelCellTotal = outerKernelCellTotal + 1;
                                     outerKernelStateSum = outerKernelStateSum + isCellActive;
                                 }
                             }
                         }
 
                         // Normalize the state sums
-                        innerKernelStateNormalized = innerKernelStateSum / f32(innerKernelCellCount);
-                        outerKernelStateNormalized = outerKernelStateSum / f32(outerKernelCellCount);
+                        innerKernelStateNormalized = innerKernelStateSum / f32(innerKernelCellTotal);
+                        outerKernelStateNormalized = outerKernelStateSum / f32(outerKernelCellTotal);
 
-                        cellInfo = CellInfo(
-                                            cell.xy, 
-                                            innerKernelCellCount, 
-                                            innerKernelStateSum, 
-                                            innerKernelStateNormalized, 
-                                            outerKernelCellCount, 
-                                            outerKernelStateSum, 
-                                            outerKernelStateNormalized
-                        );
+                        var b1: f32 = 0.26;
+                        var b2: f32 = 0.36;
+                        var d1: f32 = 0.26;
+                        var d2: f32 = 0.46;
+                        var alpha_m: f32 = 0.147;
+                        var alpha_n: f32 = 0.028;
+                        var newCellState: f32 = 0;
 
                         let cellIndex = getCellIndex(cell.xy);
                         let cellState = getCellState(cell.x, cell.y);
 
-                        var birthLowerLimit:     f32 = 0.258;
-                        var birthHigherLimit:    f32 = 0.385;
-                        var survivalLowerLimit:  f32 = 0.247;
-                        var survivalHigherLimit: f32 = 0.465;
-                        var transitionWidthM:    f32 = 0.147;
-                        var transitionWidthN:    f32 = 0.028;
-                        var threshold1:          f32 = 0;
-                        var threshold2:          f32 = 0;
-                        var aliveness:           f32 = 0;
-                        var newCellState:        f32 = 0;
+                        var aliveness_a: f32 = sigmoid_a(innerKernelStateNormalized, 0.5, alpha_m);
+                        var aliveness_b: f32 = sigmoid_b(innerKernelStateNormalized, 0.5, alpha_m);
+                        var aliveness_c: f32 = sigmoid_ab(innerKernelStateNormalized, b1, b2, alpha_m, alpha_n);
+                        var aliveness_d: f32 = sigmoid_mix(aliveness_a, aliveness_b, outerKernelStateNormalized, alpha_m);
+                        var aliveness_e: f32 = sigmoid_mix(sigmoid_ab(innerKernelStateNormalized, b1, b2, alpha_m, alpha_n),
+                                                           sigmoid_ab(innerKernelStateNormalized, d1, d2, alpha_m, alpha_n), 
+                                                           outerKernelStateNormalized, 
+                                                           alpha_m
+                                                           );
 
-                        aliveness = sigmoid(innerKernelStateNormalized, 0.5, transitionWidthM);
-                        threshold1 = mix(birthLowerLimit, survivalLowerLimit, aliveness);
-                        threshold2 = mix(birthHigherLimit, survivalHigherLimit, aliveness);
-                        newCellState = sigmoidInterval(outerKernelStateNormalized, threshold1, threshold2, transitionWidthN);
+                        // // Survival Condition
+                        // if          ((cellState > 0) && (innerKernelStateNormalized >= 0.5) && (d1 <= outerKernelStateNormalized && outerKernelStateNormalized <= d2)) {
+                        //                 cellStateOut[cellIndex] = 1;
+                        // // Birth Condition
+                        // } else if   ((cellState == 0) && (innerKernelStateNormalized < 0.5) && (b1 <= outerKernelStateNormalized && outerKernelStateNormalized <= b2)) {
+                        //                 cellStateOut[cellIndex] = 1;
+                        // // Death Condition
+                        // } else {
+                        //                 cellStateOut[cellIndex] = 0;
+                        // }
 
-                        newCellState = clamp(newCellState, 0.0, 1.0);
+                        cellStateOut[cellIndex] = aliveness_d;
 
-                        // Survival Condition
-                        if          ((cellState > 0) && (innerKernelStateNormalized > 0.5) && (survivalLowerLimit < outerKernelStateNormalized && outerKernelStateNormalized < survivalHigherLimit)) {
-                                        cellStateOut[cellIndex] = 1 - newCellState;
-                        // Birth Condition
-                        } else if   ((cellState == 0) && (innerKernelStateNormalized < 0.5) && (birthLowerLimit < outerKernelStateNormalized && outerKernelStateNormalized < birthHigherLimit)) {
-                                        cellStateOut[cellIndex] = 1;
-                        // Death Condition
-                        } else {
-                                        cellStateOut[cellIndex] = 0;
-                        }
+                        // Initialize the cell info.
+                        var cellInfo: CellInfo = CellInfo(cell.xy, 0);
+
+                        cellInfo = CellInfo(
+                                            cell.xy, 
+                                            aliveness_d, 
+                        );
 
                         output[getCellIndex(cell.xy)] = cellInfo;
                 }   
@@ -367,8 +387,8 @@
         */
 
         let canvas = document.querySelector("canvas");
-        canvas.setAttribute("width", GRID_SIZE);
-        canvas.setAttribute("height", GRID_SIZE);
+        canvas.setAttribute("width", window.innerWidth);
+        canvas.setAttribute("height", window.innerWidth);
         const context = canvas.getContext("webgpu");
         const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
         context.configure({
@@ -415,6 +435,34 @@
                 entryPoint: "computeMain",
             }
         });
+
+        function extractStructuredData(buffer) {
+            const TOTAL_CELLS = buffer.byteLength / CELL_INFO_SIZE;
+            const view = new DataView(buffer);
+
+            console.log(TOTAL_CELLS);
+            console.log(CELL_INFO_SIZE);
+            console.log(view);
+
+
+            const cells = [];
+
+            for (let getCellIndex = 0; getCellIndex < TOTAL_CELLS; getCellIndex++) {
+                const baseOffset = getCellIndex * CELL_INFO_SIZE;
+
+                const cell = {
+                    position: {
+                        x: view.getUint32(baseOffset, true),
+                        y: view.getUint32(baseOffset + 4, true) // Move 4 bytes ahead for the y value
+                    },
+                    newCellState: view.getFloat32(baseOffset + 8, true),
+                };
+
+                cells.push(cell);
+            }
+
+            return cells;
+        }
         
         async function renderLoop(){
 
@@ -465,10 +513,15 @@
 
                 stagingBuffer.unmap();
 
-            //console.log(new Float32Array(data));
+                //const structuredData = extractStructuredData(data);
+                //console.log(structuredData);
 
         }
-        setInterval(renderLoop, UPDATE_INTERVAL * 0.8);
+        setInterval(renderLoop, UPDATE_INTERVAL);
+        //renderLoop();
+        // Wait for the GPU to finish rendering before submitting another frame
+        //await device.queue.onSubmittedWorkDone();
+        //requestAnimationFrame(renderLoop);
     </script>
 </body>
 </html>
